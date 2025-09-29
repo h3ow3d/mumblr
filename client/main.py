@@ -24,7 +24,14 @@ def parse_args():
                     help="ALSA output device (headset), e.g. hw:2,0")
     ap.add_argument("--list-devices", action="store_true", help="List audio devices and exit")
     ap.add_argument("--max-buffer-ms", type=int, default=MAX_BUF_MS, help="RX buffer cap (ms)")
+    ap.add_argument("--gate", type=int, default=600,
+                    help="Noise gate RMS threshold (0-32767). 0=off")
     return ap.parse_args()
+
+def rms_i16(x: np.ndarray) -> int:
+    if x.size == 0:
+        return 0
+    return int(np.sqrt(np.mean((x.astype(np.int32))**2)))
 
 def main():
     a = parse_args()
@@ -54,15 +61,12 @@ def main():
     max_frames_in_q = max(1, a.max_buffer_ms // 20)  # e.g., 200ms -> 10 frames of 20ms
 
     def on_sound(user, chunk):
-        # push incoming network PCM as int16 array
         rx_q.put(np.frombuffer(chunk.pcm, dtype=np.int16))
 
     def out_cb(outdata, frames, time_info, status):
-        # produce exactly 'frames' samples each callback
         needed = frames
         out_buf = np.empty((needed,), dtype=np.int16)
 
-        # if queue too large, drop oldest to prevent drift
         try:
             while rx_q.qsize() > max_frames_in_q:
                 rx_q.get_nowait()
@@ -74,16 +78,13 @@ def main():
             try:
                 buf = rx_q.get_nowait()
             except queue.Empty:
-                out_buf[pos:] = 0  # underrun → play silence
+                out_buf[pos:] = 0
                 break
             take = min(len(buf), needed - pos)
             out_buf[pos:pos + take] = buf[:take]
             pos += take
             if take < len(buf):
-                # put remainder back at front (simple prepend)
                 rest = buf[take:]
-                # direct prepend: rebuild queue with rest first if available
-                # (cheap way using internal queue—safe enough for CPython Queue)
                 rx_q.queue.appendleft(rest)
 
         outdata[:] = out_buf.reshape(-1, 1)
@@ -105,7 +106,12 @@ def main():
             if status:
                 print(status)
             if frames:
-                m.sound_output.add_sound(indata[:, 0].tobytes())
+                mono = indata[:, 0]
+                if a.gate > 0 and rms_i16(mono) < a.gate:
+                    # below threshold → send silence
+                    m.sound_output.add_sound(b"\x00\x00" * frames)
+                else:
+                    m.sound_output.add_sound(mono.tobytes())
 
         stream = sd.InputStream(
             samplerate=SR, channels=CHANNELS, dtype="int16",
@@ -113,10 +119,10 @@ def main():
             callback=mic_cb
         )
         stream.start()
-        print(f"[TX] ← input device: {a.input}")
+        print(f"[TX] ← input device: {a.input} (noise gate={a.gate})")
 
     try:
-        m.join()  # block
+        m.join()
     except KeyboardInterrupt:
         pass
     finally:
