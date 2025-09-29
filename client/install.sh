@@ -17,7 +17,7 @@ source "${VENV_DIR}/bin/activate"
 
 echo "[3/3] Installing Python dependencies ..."
 pip install --upgrade pip wheel
-pip install -r "${REPO_ROOT}/client/requirements_client.txt"
+pip install -r "${REPO_ROOT}/requirements.txt"
 
 echo
 echo "✅ Client ready. Activate with:"
