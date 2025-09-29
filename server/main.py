@@ -5,7 +5,7 @@ import sys, argparse, Ice
 SLICE     = "/usr/share/slice/Murmur.ice"
 ENDPOINT  = "Meta:tcp -h 127.0.0.1 -p 6502"
 DEFAULT_CHANNEL = "My Channel"
-DEFAULT_PARENT  = 0  # 0 = root
+DEFAULT_PARENT  = 0
 
 def main():
     ap = argparse.ArgumentParser(description="Basic Murmur ICE channel ensure (no secrets)")
