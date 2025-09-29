@@ -1,3 +1,4 @@
 pymumble
 python-dotenv
-zeroc-ice
+sounddevice
+numpy

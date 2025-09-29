@@ -52,4 +52,5 @@ echo
 echo "✅ Dependencies ready. Activate with:"
 echo "    source ${VENV_DIR}/bin/activate"
 echo "Then run your script, e.g.:"
-echo "    python3 server/channels_ice.py"
+echo "    python3 server/main.py"
+in
