@@ -5,10 +5,10 @@ import pymumble_py3 as pymumble
 import sounddevice as sd
 from pymumble_py3.callbacks import PYMUMBLE_CLBK_SOUNDRECEIVED
 
-SR         = 44100
-CHANNELS   = 1
-FRAME      = 960        # 20 ms @ 48 kHz
-MAX_BUF_MS = 200        # cap RX buffer to avoid drift (drop oldest)
+SR         = 44100                 # fixed: matches your headset
+CHANNELS   = 1                     # mono path end-to-end
+FRAME      = int(SR * 0.02)        # 20 ms @ 44.1 kHz -> 882 samples
+MAX_BUF_MS = 200                   # cap RX buffer to avoid drift (drop oldest)
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Mumblr client (audio)")
@@ -24,13 +24,14 @@ def parse_args():
                     help="ALSA output device (headset), e.g. hw:2,0")
     ap.add_argument("--list-devices", action="store_true", help="List audio devices and exit")
     ap.add_argument("--max-buffer-ms", type=int, default=MAX_BUF_MS, help="RX buffer cap (ms)")
-    ap.add_argument("--gate", type=int, default=600,
+    ap.add_argument("--gate", type=int, default=0,
                     help="Noise gate RMS threshold (0-32767). 0=off")
     return ap.parse_args()
 
 def rms_i16(x: np.ndarray) -> int:
     if x.size == 0:
         return 0
+    # use int32 to avoid overflow during square
     return int(np.sqrt(np.mean((x.astype(np.int32))**2)))
 
 def main():
@@ -61,12 +62,14 @@ def main():
     max_frames_in_q = max(1, a.max_buffer_ms // 20)  # e.g., 200ms -> 10 frames of 20ms
 
     def on_sound(user, chunk):
+        # push incoming network PCM as int16 array
         rx_q.put(np.frombuffer(chunk.pcm, dtype=np.int16))
 
     def out_cb(outdata, frames, time_info, status):
         needed = frames
         out_buf = np.empty((needed,), dtype=np.int16)
 
+        # if queue too large, drop oldest to prevent drift
         try:
             while rx_q.qsize() > max_frames_in_q:
                 rx_q.get_nowait()
@@ -78,12 +81,13 @@ def main():
             try:
                 buf = rx_q.get_nowait()
             except queue.Empty:
-                out_buf[pos:] = 0
+                out_buf[pos:] = 0  # underrun → play silence
                 break
             take = min(len(buf), needed - pos)
             out_buf[pos:pos + take] = buf[:take]
             pos += take
             if take < len(buf):
+                # put remainder back at front (simple prepend)
                 rest = buf[take:]
                 rx_q.queue.appendleft(rest)
 
@@ -97,19 +101,17 @@ def main():
             callback=out_cb
         )
         out.start()
-        print(f"[RX] → output device: {a.output} (drift-safe)")
+        print(f"[RX] → output device: {a.output} (drift-safe @ {SR} Hz, frame={FRAME})")
 
     # === TX path: capture microphone from headset (exact 20ms frames) ===
     stream = None
     if a.mode in ("tx", "both"):
         def mic_cb(indata, frames, time_info, status):
-            if status:
-                print(status)
+            # avoid printing here (stdout I/O can cause stutter)
             if frames:
                 mono = indata[:, 0]
                 if a.gate > 0 and rms_i16(mono) < a.gate:
-                    # below threshold → send silence
-                    m.sound_output.add_sound(b"\x00\x00" * frames)
+                    m.sound_output.add_sound(b"\x00\x00" * frames)  # send silence
                 else:
                     m.sound_output.add_sound(mono.tobytes())
 
@@ -119,10 +121,11 @@ def main():
             callback=mic_cb
         )
         stream.start()
-        print(f"[TX] ← input device: {a.input} (noise gate={a.gate})")
+        gate_info = f", noise gate={a.gate}" if a.gate else ""
+        print(f"[TX] ← input device: {a.input} (@ {SR} Hz, frame={FRAME}{gate_info})")
 
     try:
-        m.join()
+        m.join()  # block
     except KeyboardInterrupt:
         pass
     finally:
