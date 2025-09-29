@@ -5,9 +5,8 @@ import pymumble_py3 as pymumble
 import sounddevice as sd
 from pymumble_py3.callbacks import PYMUMBLE_CLBK_SOUNDRECEIVED
 
-SAMPLE_RATE = 48000   # Mumble = 48 kHz
 CHANNELS    = 1
-FRAME       = 960     # 20ms @ 48kHz
+FRAME       = 960
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Mumblr client (audio)")
@@ -49,7 +48,7 @@ def main():
     # === RX path: play received audio to headset ===
     out = None
     if a.mode in ("rx", "both"):
-        out = sd.OutputStream(samplerate=SAMPLE_RATE, channels=CHANNELS, dtype="int16",
+        out = sd.OutputStream(channels=CHANNELS, dtype="int16",
                               device=a.output, blocksize=FRAME)
         out.start()
 
@@ -70,7 +69,7 @@ def main():
                 # int16 mono 20ms frames as bytes
                 m.sound_output.add_sound(indata[:, 0].tobytes())
 
-        stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=CHANNELS, dtype="int16",
+        stream = sd.InputStream(channels=CHANNELS, dtype="int16",
                                 device=a.input, blocksize=FRAME, callback=mic_cb)
         stream.start()
         print(f"[TX] ← input device: {a.input}")
