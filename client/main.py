@@ -5,10 +5,11 @@ import pymumble_py3 as pymumble
 import sounddevice as sd
 from pymumble_py3.callbacks import PYMUMBLE_CLBK_SOUNDRECEIVED
 
-SR         = 44100                 # fixed: matches your headset
-CHANNELS   = 1                     # mono path end-to-end
-FRAME      = int(SR * 0.02)        # 20 ms @ 44.1 kHz -> 882 samples
-MAX_BUF_MS = 200                   # cap RX buffer to avoid drift (drop oldest)
+# Stable combo for RPi + H340:
+SR         = 44100
+CHANNELS   = 1
+FRAME      = 960                # ~21.8 ms @ 44.1 kHz (more headroom, fewer XRUNs)
+MAX_BUF_MS = 200                # cap RX buffer to avoid drift (drop oldest)
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Mumblr client (audio)")
@@ -26,50 +27,70 @@ def parse_args():
     ap.add_argument("--max-buffer-ms", type=int, default=MAX_BUF_MS, help="RX buffer cap (ms)")
     ap.add_argument("--gate", type=int, default=0,
                     help="Noise gate RMS threshold (0-32767). 0=off")
+    ap.add_argument("--highpass", type=float, default=0.0,
+                    help="High-pass filter cutoff in Hz (0=off)")
     return ap.parse_args()
 
 def rms_i16(x: np.ndarray) -> int:
     if x.size == 0:
         return 0
-    # use int32 to avoid overflow during square
     return int(np.sqrt(np.mean((x.astype(np.int32))**2)))
+
+class HighPass:
+    """Simple one-pole high-pass: y[n]=α*(y[n-1]+x[n]-x[n-1])."""
+    def __init__(self, cutoff_hz: float, sr: int):
+        self.enabled = cutoff_hz > 0
+        self.prev_x = 0.0
+        self.prev_y = 0.0
+        if self.enabled:
+            rc = 1.0 / (2 * np.pi * cutoff_hz)
+            self.alpha = rc / (rc + 1.0/sr)
+    def process(self, x: np.ndarray) -> np.ndarray:
+        if not self.enabled:
+            return x
+        y = np.empty_like(x, dtype=np.float32)
+        px, py, a = self.prev_x, self.prev_y, self.alpha
+        xf = x.astype(np.float32, copy=False)
+        for i in range(xf.shape[0]):
+            xi = xf[i]
+            yi = a * (py + xi - px)
+            y[i] = yi
+            px, py = xi, yi
+        self.prev_x, self.prev_y = px, py
+        # clamp back to int16
+        y = np.clip(y, -32768, 32767).astype(np.int16)
+        return y
 
 def main():
     a = parse_args()
 
     if a.list_devices:
-        print(sd.query_devices())
-        return
+        print(sd.query_devices()); return
 
     # Connect to Mumble
     m = pymumble.Mumble(a.host, a.name, port=a.port, reconnect=True)
     m.set_receive_sound(a.mode in ("rx", "both"))
-    m.start()
-    m.is_ready()
+    m.start(); m.is_ready()
     print(f"[Mumblr] Connected as {a.name}")
 
     # Join channel by name (if present)
     ch = m.channels.find_by_name(a.channel)
-    if ch:
-        ch.move_in()
-        print(f"[Mumblr] Joined channel: {a.channel}")
-    else:
-        print(f"[Mumblr] Channel '{a.channel}' not found; staying in root")
+    if ch: ch.move_in(); print(f"[Mumblr] Joined channel: {a.channel}")
+    else:  print(f"[Mumblr] Channel '{a.channel}' not found; staying in root")
 
     # === RX path: drift-safe output via callback ===
     out = None
     rx_q = queue.Queue()
-    max_frames_in_q = max(1, a.max_buffer_ms // 20)  # e.g., 200ms -> 10 frames of 20ms
+    max_frames_in_q = max(1, a.max_buffer_ms // int(1000 * FRAME / SR))  # ~ms->frames
 
     def on_sound(user, chunk):
-        # push incoming network PCM as int16 array
         rx_q.put(np.frombuffer(chunk.pcm, dtype=np.int16))
 
     def out_cb(outdata, frames, time_info, status):
         needed = frames
         out_buf = np.empty((needed,), dtype=np.int16)
 
-        # if queue too large, drop oldest to prevent drift
+        # cap queue size to bound latency
         try:
             while rx_q.qsize() > max_frames_in_q:
                 rx_q.get_nowait()
@@ -81,15 +102,13 @@ def main():
             try:
                 buf = rx_q.get_nowait()
             except queue.Empty:
-                out_buf[pos:] = 0  # underrun → play silence
+                out_buf[pos:] = 0
                 break
             take = min(len(buf), needed - pos)
             out_buf[pos:pos + take] = buf[:take]
             pos += take
             if take < len(buf):
-                # put remainder back at front (simple prepend)
-                rest = buf[take:]
-                rx_q.queue.appendleft(rest)
+                rx_q.queue.appendleft(buf[take:])  # put remainder back
 
         outdata[:] = out_buf.reshape(-1, 1)
 
@@ -101,17 +120,18 @@ def main():
             callback=out_cb
         )
         out.start()
-        print(f"[RX] → output device: {a.output} (drift-safe @ {SR} Hz, frame={FRAME})")
+        print(f"[RX] → {a.output} @ {SR} Hz (frame={FRAME}, drift-safe)")
 
-    # === TX path: capture microphone from headset (exact 20ms frames) ===
+    # === TX path: microphone capture ===
+    hp = HighPass(a.highpass, SR) if a.highpass > 0 else None
     stream = None
     if a.mode in ("tx", "both"):
         def mic_cb(indata, frames, time_info, status):
-            # avoid printing here (stdout I/O can cause stutter)
             if frames:
                 mono = indata[:, 0]
+                if hp: mono = hp.process(mono)
                 if a.gate > 0 and rms_i16(mono) < a.gate:
-                    m.sound_output.add_sound(b"\x00\x00" * frames)  # send silence
+                    m.sound_output.add_sound(b"\x00\x00" * frames)  # silence
                 else:
                     m.sound_output.add_sound(mono.tobytes())
 
@@ -121,18 +141,19 @@ def main():
             callback=mic_cb
         )
         stream.start()
-        gate_info = f", noise gate={a.gate}" if a.gate else ""
-        print(f"[TX] ← input device: {a.input} (@ {SR} Hz, frame={FRAME}{gate_info})")
+        info = []
+        if a.gate: info.append(f"gate={a.gate}")
+        if a.highpass: info.append(f"highpass={int(a.highpass)}Hz")
+        extra = f" ({', '.join(info)})" if info else ""
+        print(f"[TX] ← {a.input} @ {SR} Hz (frame={FRAME}){extra}")
 
     try:
-        m.join()  # block
+        m.join()
     except KeyboardInterrupt:
         pass
     finally:
-        if stream:
-            stream.stop(); stream.close()
-        if out:
-            out.stop(); out.close()
+        if stream: stream.stop(); stream.close()
+        if out:    out.stop(); out.close()
         m.stop()
 
 if __name__ == "__main__":
