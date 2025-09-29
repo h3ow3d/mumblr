@@ -1,2 +1,3 @@
 pymumble
 python-dotenv
+zeroc-ice
