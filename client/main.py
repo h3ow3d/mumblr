@@ -5,7 +5,7 @@ import pymumble_py3 as pymumble
 import sounddevice as sd
 from pymumble_py3.callbacks import PYMUMBLE_CLBK_SOUNDRECEIVED
 
-SR         = 48000      # <-- explicit 48 kHz to match Mumble
+SR         = 44100
 CHANNELS   = 1
 FRAME      = 960        # 20 ms @ 48 kHz
 MAX_BUF_MS = 200        # cap RX buffer to avoid drift (drop oldest)
