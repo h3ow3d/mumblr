@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, pymumble
+import argparse, pymumble_py3 as pymumble
 
 def main():
     ap = argparse.ArgumentParser(description="Basic Mumblr client")
